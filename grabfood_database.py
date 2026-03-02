@@ -63,7 +63,7 @@ def send_to_db(data):
         create_menu_query = """
         CREATE TABLE IF NOT EXISTS menu (
             id bigint auto_increment PRIMARY KEY,
-            item_id VARCHAR(100) ,
+            item_id VARCHAR(100) unique,
             merchant_id VARCHAR(100),
             category_name VARCHAR(100),
             name VARCHAR(255),
@@ -81,6 +81,8 @@ def send_to_db(data):
         (item_id, merchant_id, category_name, name,
          description, price, available, images)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+        item_id=VALUES(item_id)
         """
 
         restaurant_list=[]
@@ -143,3 +145,4 @@ def send_to_db(data):
             cursor.close()
         if conn:
             conn.close()
+
