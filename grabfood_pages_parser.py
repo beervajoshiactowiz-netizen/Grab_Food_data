@@ -51,11 +51,11 @@ def parser(pages):
             "menu": []
         }
         for offers in merchant.get("offerCarousel",{}).get("offerHighlights",[]):
-            off={
+            offer={
                     "Title": offers.get("highlight").get("title"),
                     "SubTitle":offers.get("highlight").get("subtitle")
             }
-            result["Offers"].append(off)
+            result["Offers"].append(offer)
 
         # Build Menu List Category Wise
         for category in merchant.get("menu", {}).get("categories", []):
@@ -82,4 +82,5 @@ def parser(pages):
         result = {k: v for k, v in result.items() if v is not None}
         page.append(result)
     return page
+
 
