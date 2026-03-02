@@ -88,12 +88,12 @@ def send_to_db(data):
         restaurant_list=[]
         menu_list=[]
         for restaurant in data:
-            m_id = restaurant.get("merchant_id")
-            if not m_id:
+            merchantId = restaurant.get("merchant_id")
+            if not merchantId:
                 continue
 
             restaurant_list.append( (
-                m_id,
+                merchantId,
                 restaurant.get("name"),
                 restaurant.get("cuisine"),
                 restaurant.get("timingEveryday"),
@@ -145,4 +145,5 @@ def send_to_db(data):
             cursor.close()
         if conn:
             conn.close()
+
 
