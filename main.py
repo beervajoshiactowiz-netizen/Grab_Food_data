@@ -1,40 +1,64 @@
 import time
+import sys
 from grabfood_models import Restaurant
-from grabfood_pages_parser import load_files,parser
-from grabfood_database import send_to_db
-
+from grabfood_pages_parser import parser
+import gzip, json, os
+from grabfood_database import (
+    create_connection,
+    create_tables,
+    send_to_db
+)
 
 start_time=time.time()
+folder_name="PDP"
 
-file_name="grab_food_pages"
-file_data=load_files(file_name)
-extracted_data = parser(file_data)
-
-validated_data=[]
 failed_record=0
 
-for record in extracted_data:
+conn = create_connection()     #calling the connection function
+cursor = conn.cursor()    #cursor object
+create_tables(cursor)
+
+start_index = int(sys.argv[1])
+end_index = int(sys.argv[2])
+all_files = sorted([f for f in os.listdir(folder_name) if f.endswith(".gz")])
+selected_files = all_files[start_index:end_index]
+
+
+validated_data = []
+for file in selected_files:
+    fullpath = os.path.join(folder_name, file)
+
     try:
-        validated_record = Restaurant(**record)
-        validated_data.append(validated_record)
+        with gzip.open(fullpath, 'rt', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            pages = [data]
+        elif isinstance(data, list):
+            pages = data
+        else:
+            continue
+        #calling parser function to parse each file
+        extracted_data = parser(pages)
+
+        for record in extracted_data:
+            try:
+                validated_record = Restaurant(**record)
+                validated_data.append(validated_record.model_dump())
+            except Exception:
+                failed_record += 1
+
     except Exception as e:
-        failed_record += 1
-        print("Validation error:", e)
-
-
-print(f"Valid data: {len(validated_data)}")
-print(f"Invalid data: {failed_record}")
+        print("File error:", file, e)
 
 if validated_data:
-    try:
-        send_to_db([record.model_dump() for record in validated_data])
-        print("data inserted successfully")
-    except Exception as e:
-        print("database error", e)
+    send_to_db(validated_data,cursor,conn)
+    print(f"Inserted chunk with {len(validated_data)} restaurants")
+    validated_data.clear()
 
-else:
-    print("No valid data to insert")
 
-end_time=time.time()
-total_time=end_time-start_time
-print(total_time)
+cursor.close()
+conn.close()
+
+print("Failed Records:", failed_record)
+print("Total Time:", time.time() - start_time)
