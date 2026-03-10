@@ -1,6 +1,7 @@
 import time
 import sys
 import threading
+import logging
 from grabfood_models import Restaurant
 from grabfood_pages_parser import parser
 import gzip, json, os
@@ -10,6 +11,29 @@ from grabfood_database import (
     send_to_db
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler("grabfood.log"),   # saves to file
+    ]
+)
+logger = logging.getLogger(__name__)
+
+query_logger = logging.getLogger("query_logger")
+query_logger.setLevel(logging.INFO)
+query_handler = logging.FileHandler("query.log", encoding='utf-8')
+query_handler.setFormatter(logging.Formatter("%(message)s"))
+query_logger.addHandler(query_handler)
+query_logger.propagate = False
+
+create_logger = logging.getLogger("create_logger")
+create_logger.setLevel(logging.INFO)
+create_handler = logging.FileHandler("create_query.log",encoding='utf-8')
+create_handler.setFormatter(logging.Formatter("%(message)s"))
+create_logger.addHandler(create_handler)
+create_logger.propagate = False
 
 folder_name="PDP"
 total_inserted=0
@@ -54,21 +78,21 @@ def main(thread_id, start_index, end_index):
                     failed_record += 1
 
         except Exception as e:
-            print("File error:", file, e)
+            logger.error(f"[Thread-{thread_id}] File error: {file} -> {e}")
 
     if validated_data:
         send_to_db(validated_data,cursor,conn)
-        print(f"[Thread-{thread_id}] Inserted chunk with {len(validated_data)} restaurants")
-        validated_data.clear()
+        logger.info(f"[Thread-{thread_id}] Inserted: {len(validated_data)} | Failed: {failed_record}")
+
 
 
     cursor.close()
     conn.close()
 
-    print("Failed Records:", failed_record)
     with lock:
         total_inserted += len(validated_data)
         total_failed += failed_record
+        validated_data.clear()
 
 
 def total(total_files,parts):
@@ -78,7 +102,7 @@ def total(total_files,parts):
 
     for i, start in enumerate(range(0, total_files, range_of_files), 1):
         end = min(start + range_of_files, total_files)
-        print(f"[Thread-{i}] Starting -> files {start} to {end}")
+        logger.info(f"[Thread-{i}] Starting -> files {start} to {end}")
         t = threading.Thread(target=main, args=(i, start, end))
         threads.append(t)
         t.start()
@@ -86,10 +110,9 @@ def total(total_files,parts):
     for t in threads:
         t.join()
 
-    print(f"Total Failed  : {total_failed}")
 
 
 if __name__=="__main__":
     start_time = time.time()
-    total(60000,10)
-    print(f"Total Time    : {time.time() - start_time:.2f} sec")
+    total(60000,6)
+    logger.info(f"Time: {time.time() - start_time:.2f} sec")
