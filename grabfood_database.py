@@ -1,49 +1,14 @@
 import json
+import logging
 import mysql.connector
-import logging, threading
 
-logger       = logging.getLogger(__name__)
-query_logger = logging.getLogger("query_logger")
-create_logger = logging.getLogger("create_logger")
+logger = logging.getLogger(__name__)
+query_logger = logging.getLogger('query_logger')
 
-create_query = """
-            CREATE TABLE IF NOT EXISTS pdp_data (
-                merchant_id VARCHAR(100) PRIMARY KEY,
-                name VARCHAR(255),
-                cuisine VARCHAR(100),
-                timingEveryday VARCHAR(100),
-                distance FLOAT,
-                ETA INT,
-                rating FLOAT,
-                DeliveryBy VARCHAR(100),
-                DeliveryOption JSON,
-                VoteCount INT,
-                Tips JSON,
-                BuisinessType VARCHAR(50),
-                Offers JSON,
-                menu JSON
-            );
-            """
-
-
-def format_value(val):
-    if val is None:
-        return "NULL"
-    if isinstance(val, str):
-        try:
-            parsed = json.loads(val)
-            val    = json.dumps(parsed, ensure_ascii=False)
-        except (json.JSONDecodeError, TypeError):
-            pass
-        val = val.replace("\\", "\\\\")  # escape backslashes first
-        val = val.replace("'",  "''")    # escape single quotes
-        return f"'{val}'"
-    return str(val)
-
-
+# batching generator
 def make_batches(data_list, batch_size=2000):
     for i in range(0, len(data_list), batch_size):
-        yield data_list[i : i + batch_size]
+        yield data_list[i:i + batch_size]
 
 
 def create_connection():
@@ -55,31 +20,99 @@ def create_connection():
     )
 
 
-_create_logged = False
-_create_lock   = threading.Lock()
-
 def create_tables(cursor):
-    global _create_logged
-    cursor.execute(create_query)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pdp_data (
+            merchant_id VARCHAR(100) PRIMARY KEY,
+            name VARCHAR(255),
+            cuisine VARCHAR(100),
+            timingEveryday VARCHAR(100),
+            distance FLOAT,
+            ETA INT,
+            rating FLOAT,
+            DeliveryBy VARCHAR(100),
+            DeliveryOption JSON,
+            VoteCount INT,
+            Tips JSON,
+            BuisinessType VARCHAR(50),
+            Offers JSON,
+            menu JSON
+        );
+    """)
+def format_sql_value(val):
+    if val is None:
+        return "NULL"
+    if isinstance(val, (int, float)):
+        return str(val)
+    return "'" + str(val).replace("'", "''") + "'"
 
-    with _create_lock:
-        if not _create_logged:
-            create_logger.info(create_query.strip())
-            _create_logged = True
 
+def build_insert_query(row):
 
+    cols = [
+        "merchant_id","name","cuisine","timingEveryday","distance",
+        "ETA","rating","DeliveryBy","DeliveryOption","VoteCount",
+        "Tips","BuisinessType","Offers","menu"
+    ]
+
+    values = ", ".join(format_sql_value(v) for v in row)
+
+    query = f"""
+INSERT INTO pdp_data ({",".join(cols)})
+VALUES ({values})
+ON DUPLICATE KEY UPDATE
+name=VALUES(name),
+cuisine=VALUES(cuisine),
+timingEveryday=VALUES(timingEveryday),
+distance=VALUES(distance),
+ETA=VALUES(ETA),
+rating=VALUES(rating),
+DeliveryBy=VALUES(DeliveryBy),
+DeliveryOption=VALUES(DeliveryOption),
+VoteCount=VALUES(VoteCount),
+Tips=VALUES(Tips),
+BuisinessType=VALUES(BuisinessType),
+Offers=VALUES(Offers),
+menu=VALUES(menu);
+"""
+
+    return query.strip()
+    
 def send_to_db(data, cursor, conn):
-    if not data:
-        return
+
+    insert_restaurant = """
+        INSERT INTO pdp_data
+        (merchant_id, name, cuisine, timingEveryday, distance,
+         ETA, rating, DeliveryBy, DeliveryOption, VoteCount,
+         Tips, BuisinessType, Offers, menu)
+
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+
+        ON DUPLICATE KEY UPDATE
+        name=VALUES(name),
+        cuisine=VALUES(cuisine),
+        timingEveryday=VALUES(timingEveryday),
+        distance=VALUES(distance),
+        ETA=VALUES(ETA),
+        rating=VALUES(rating),
+        DeliveryBy=VALUES(DeliveryBy),
+        DeliveryOption=VALUES(DeliveryOption),
+        VoteCount=VALUES(VoteCount),
+        Tips=VALUES(Tips),
+        BuisinessType=VALUES(BuisinessType),
+        Offers=VALUES(Offers),
+        menu=VALUES(menu)
+    """
 
     restaurant_list = []
 
     for restaurant in data:
+
         m_id = restaurant.get("merchant_id")
         if not m_id:
             continue
 
-        restaurant_list.append((
+        row=(
             m_id,
             restaurant.get("name"),
             restaurant.get("cuisine"),
@@ -88,32 +121,26 @@ def send_to_db(data, cursor, conn):
             restaurant.get("ETA"),
             restaurant.get("rating"),
             restaurant.get("DeliveryBy"),
-            json.dumps(restaurant.get("DeliveryOption", []), ensure_ascii=False),
+            json.dumps(restaurant.get("DeliveryOption", [])),
             restaurant.get("VoteCount"),
-            json.dumps(restaurant.get("Tips", []),           ensure_ascii=False),
+            json.dumps(restaurant.get("Tips", [])),
             restaurant.get("BuisinessType"),
-            json.dumps(restaurant.get("Offers", []),         ensure_ascii=False),
-            json.dumps(restaurant.get("menu", []),           ensure_ascii=False)
-        ))
+            json.dumps(restaurant.get("Offers", [])),
+            json.dumps(restaurant.get("menu", []))
+        )
+        restaurant_list.append(row)
 
-    if not restaurant_list:
-        return
+        query = build_insert_query(row)
+        query_logger.info(query)
 
-    cols      = "merchant_id, name, cuisine, timingEveryday, distance, ETA, rating, DeliveryBy, DeliveryOption, VoteCount, Tips, BuisinessType, Offers, menu"
-    col_list  = cols.split(", ")
-    vals      = ", ".join(["%s"] * len(col_list))
-    update    = ", ".join([f"{c}=VALUES({c})" for c in col_list])
-
-    insert_q  = f"INSERT INTO pdp_data ({cols}) VALUES ({vals}) ON DUPLICATE KEY UPDATE {update}"
+    total = len(restaurant_list)
 
 
+    # batch insert
     for batch in make_batches(restaurant_list, 2000):
-        cursor.executemany(insert_q, batch)
-        conn.commit()
+        cursor.executemany(insert_restaurant, batch)
 
-        for row in batch:
-            formatted_vals = ", ".join(format_value(v) for v in row)
-            sql = f"INSERT INTO pdp_data ({cols}) VALUES ({formatted_vals}) ON DUPLICATE KEY UPDATE {update};"
-            query_logger.info(sql)
+    # SINGLE COMMIT
+    conn.commit()
 
-    logger.info(f"Processed {len(restaurant_list)} restaurants.")
+    print(f"Processed {total} restaurants.")
