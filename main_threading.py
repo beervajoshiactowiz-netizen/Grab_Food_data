@@ -1,60 +1,52 @@
 import time
-import sys
 import threading
+import gzip
+import json
+import os
 import logging
+import logging.handlers
+
 from grabfood_models import Restaurant
-from grabfood_pages_parser import parser
-import gzip, json, os
-from grabfood_database import (
-    create_connection,
-    create_tables,
-    send_to_db
-)
+from parser_2 import parser
+from database_2 import create_connection, create_tables, send_to_db
 
 logging.basicConfig(
+    filename='grabfood_processing_2.log',
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler("grabfood.log"),   # saves to file
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-query_logger = logging.getLogger("query_logger")
+os.makedirs('logs', exist_ok=True)
+query_logger = logging.getLogger('query_logger')
 query_logger.setLevel(logging.INFO)
-query_handler = logging.FileHandler("query.log", encoding='utf-8')
-query_handler.setFormatter(logging.Formatter("%(message)s"))
-query_logger.addHandler(query_handler)
+if not query_logger.handlers:
+    query_handler = logging.handlers.RotatingFileHandler('logs/query.log', maxBytes=100*1024*1024, backupCount=30,encoding='utf-8')
+    query_handler.setFormatter(logging.Formatter('%(message)s'))
+    query_logger.addHandler(query_handler)
 query_logger.propagate = False
 
-create_logger = logging.getLogger("create_logger")
-create_logger.setLevel(logging.INFO)
-create_handler = logging.FileHandler("create_query.log",encoding='utf-8')
-create_handler.setFormatter(logging.Formatter("%(message)s"))
-create_logger.addHandler(create_handler)
-create_logger.propagate = False
+folder_name = r"C:\Users\beerva.joshi\PycharmProjects\grabfood\PDP"
 
-folder_name="PDP"
-total_inserted=0
-total_failed=0
-lock=threading.Lock()
+total_inserted = 0
+total_failed = 0
+
+lock = threading.Lock()
 
 
-def main(thread_id, start_index, end_index):
-    global total_failed,total_inserted
-    failed_record=0
+def main(thread_id, selected_files):
 
-    conn = create_connection()     #calling the connection function
-    cursor = conn.cursor()    #cursor object
-    create_tables(cursor)
+    global total_failed, total_inserted
 
-    all_files = sorted([f for f in os.listdir(folder_name) if f.endswith(".gz")])
-    selected_files = all_files[start_index:end_index]
+    failed_record = 0
+    inserted_count = 0
 
+    conn = create_connection()
+    cursor = conn.cursor()
 
     validated_data = []
+
     for file in selected_files:
+
         fullpath = os.path.join(folder_name, file)
 
         try:
@@ -67,52 +59,88 @@ def main(thread_id, start_index, end_index):
                 pages = data
             else:
                 continue
-            #calling parser function to parse each file
+
             extracted_data = parser(pages)
 
             for record in extracted_data:
                 try:
                     validated_record = Restaurant(**record)
                     validated_data.append(validated_record.model_dump())
+
                 except Exception:
                     failed_record += 1
 
         except Exception as e:
-            logger.error(f"[Thread-{thread_id}] File error: {file} -> {e}")
+            logger.error("File error: %s, Error: %s", file, e)
 
+        # Insert every 2000 records to avoid huge memory list
+        if len(validated_data) >= 2000:
+            send_to_db(validated_data, cursor, conn)
+            inserted_count += len(validated_data)
+            validated_data.clear()
+
+    # Insert remaining records
     if validated_data:
-        send_to_db(validated_data,cursor,conn)
-        logger.info(f"[Thread-{thread_id}] Inserted: {len(validated_data)} | Failed: {failed_record}")
-
-
+        send_to_db(validated_data, cursor, conn)
+        inserted_count += len(validated_data)
 
     cursor.close()
     conn.close()
 
+    logger.info(f"[Thread-{thread_id}] Inserted {inserted_count}")
+
     with lock:
-        total_inserted += len(validated_data)
+        total_inserted += inserted_count
         total_failed += failed_record
-        validated_data.clear()
 
 
-def total(total_files,parts):
+def total(total_files, parts):
 
-    range_of_files=int(total_files/parts)
-    threads=[]
+    global folder_name
 
-    for i, start in enumerate(range(0, total_files, range_of_files), 1):
-        end = min(start + range_of_files, total_files)
-        logger.info(f"[Thread-{i}] Starting -> files {start} to {end}")
-        t = threading.Thread(target=main, args=(i, start, end))
+    threads = []
+
+    # READ FILES ONLY ONCE
+    all_files = sorted([f for f in os.listdir(folder_name) if f.endswith(".gz")])
+
+    chunk_size = total_files // parts
+
+    for i in range(parts):
+
+        start = i * chunk_size
+
+        if i == parts - 1:
+            end = total_files
+        else:
+            end = start + chunk_size
+
+        selected_files = all_files[start:end]
+
+        logger.info(f"[Thread-{i+1}] Starting -> files {start} to {end}")
+
+        t = threading.Thread(target=main, args=(i + 1, selected_files))
+
         threads.append(t)
         t.start()
 
     for t in threads:
         t.join()
 
+    logger.info(f"Total Inserted : {total_inserted}")
+    logger.info(f"Total Failed   : {total_failed}")
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
+
     start_time = time.time()
-    total(60000,6)
-    logger.info(f"Time: {time.time() - start_time:.2f} sec")
+
+    # CREATE TABLES ONLY ONCE
+    conn = create_connection()
+    cursor = conn.cursor()
+    create_tables(cursor)
+    cursor.close()
+    conn.close()
+
+    total(60000, 6)
+
+    logger.info(f"Total Time : {time.time() - start_time:.2f} sec")
